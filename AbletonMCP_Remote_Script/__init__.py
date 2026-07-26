@@ -233,7 +233,8 @@ class AbletonMCP(ControlSurface):
                                  "start_playback", "stop_playback", "load_browser_item",
                                  # Arrangement view – must run on the main thread
                                  "switch_to_arrangement_view", "set_current_song_time",
-                                 "duplicate_session_clip_to_arrangement"]:
+                                 "duplicate_session_clip_to_arrangement",
+                                 "set_track_mixer"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -303,6 +304,13 @@ class AbletonMCP(ControlSurface):
                             destination_time = params.get("destination_time", 0.0)
                             result = self._duplicate_session_clip_to_arrangement(
                                 track_index, clip_index, destination_time)
+                        elif command_type == "set_track_mixer":
+                            result = self._set_track_mixer(
+                                params.get("track_index", 0),
+                                params.get("volume", None),
+                                params.get("pan", None),
+                                params.get("mute", None),
+                                params.get("solo", None))
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -356,6 +364,10 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_arrangement_clips":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_arrangement_clips(track_index)
+            elif command_type == "get_clip_notes":
+                track_index = params.get("track_index", 0)
+                clip_index = params.get("clip_index", 0)
+                response["result"] = self._get_clip_notes(track_index, clip_index)
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -500,7 +512,40 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error setting track name: " + str(e))
             raise
-    
+
+    def _set_track_mixer(self, track_index, volume=None, pan=None, mute=None, solo=None):
+        """Set mixer properties on a track. Only the provided values are changed."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            mixer = track.mixer_device
+
+            if volume is not None:
+                if not 0.0 <= volume <= 1.0:
+                    raise ValueError("volume must be between 0.0 and 1.0")
+                mixer.volume.value = volume
+            if pan is not None:
+                if not -1.0 <= pan <= 1.0:
+                    raise ValueError("pan must be between -1.0 and 1.0")
+                mixer.panning.value = pan
+            if mute is not None:
+                track.mute = bool(mute)
+            if solo is not None:
+                track.solo = bool(solo)
+
+            return {
+                "name": track.name,
+                "volume": mixer.volume.value,
+                "panning": mixer.panning.value,
+                "mute": track.mute,
+                "solo": track.solo,
+            }
+        except Exception as e:
+            self.log_message("Error setting track mixer: " + str(e))
+            raise
+
     def _create_clip(self, track_index, clip_index, length):
         """Create a new MIDI clip in the specified track and clip slot"""
         try:
@@ -621,6 +666,62 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error adding notes to clip: " + str(e))
             raise
     
+    def _get_clip_notes(self, track_index, clip_index):
+        """Read the MIDI notes of a Session-view clip"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot")
+
+            clip = clip_slot.clip
+
+            if not clip.is_midi_clip:
+                raise Exception("Clip is not a MIDI clip")
+
+            notes = []
+            if hasattr(clip, "get_notes_extended"):
+                # Live 11+: returns MidiNote objects with rich attributes
+                for n in clip.get_notes_extended(0, 128, 0.0, clip.length):
+                    notes.append({
+                        "pitch": n.pitch,
+                        "start_time": n.start_time,
+                        "duration": n.duration,
+                        "velocity": n.velocity,
+                        "mute": n.mute,
+                        "probability": getattr(n, "probability", 1.0),
+                        "velocity_deviation": getattr(n, "velocity_deviation", 0.0),
+                    })
+            else:
+                # Pre-11 fallback: tuples of (pitch, start, duration, velocity, mute)
+                for pitch, start, duration, velocity, mute in clip.get_notes(0.0, 0, clip.length, 128):
+                    notes.append({
+                        "pitch": pitch,
+                        "start_time": start,
+                        "duration": duration,
+                        "velocity": velocity,
+                        "mute": mute,
+                    })
+
+            notes.sort(key=lambda n: (n["start_time"], n["pitch"]))
+            return {
+                "clip_name": clip.name,
+                "length": clip.length,
+                "note_count": len(notes),
+                "notes": notes,
+            }
+        except Exception as e:
+            self.log_message("Error getting clip notes: " + str(e))
+            raise
+
     def _set_clip_name(self, track_index, clip_index, name):
         """Set the name of a clip"""
         try:
@@ -943,15 +1044,32 @@ class AbletonMCP(ControlSurface):
             
             # Select the track
             self._song.view.selected_track = track
-            
+
+            devices_before = [d.name for d in track.devices]
+
             # Load the item
             app.browser.load_item(item)
-            
+
+            devices_after = [d.name for d in track.devices]
+            # Diff by multiset so a duplicate of an existing device still shows up
+            before_counts = {}
+            for name in devices_before:
+                before_counts[name] = before_counts.get(name, 0) + 1
+            new_devices = []
+            for name in devices_after:
+                if before_counts.get(name, 0) > 0:
+                    before_counts[name] -= 1
+                else:
+                    new_devices.append(name)
+
             result = {
                 "loaded": True,
                 "item_name": item.name,
                 "track_name": track.name,
-                "uri": item_uri
+                "uri": item_uri,
+                "devices_before": devices_before,
+                "devices_after": devices_after,
+                "new_devices": new_devices
             }
             return result
         except Exception as e:

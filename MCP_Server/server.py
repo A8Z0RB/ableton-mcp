@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List, Union
+from typing import AsyncIterator, Dict, Any, List, Optional, Union
 
 from .telemetry import record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
@@ -115,6 +115,7 @@ class AbletonConnection:
             "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
             "start_playback", "stop_playback", "load_instrument_or_effect",
+            "set_track_mixer",
             # Arrangement view commands
             "switch_to_arrangement_view", "set_current_song_time",
             "duplicate_session_clip_to_arrangement"
@@ -424,6 +425,79 @@ def add_notes_to_clip(
         return f"Error adding notes to clip: {str(e)}"
 
 @mcp.tool()
+@telemetry_tool("get_clip_notes")
+def get_clip_notes(ctx: Context, track_index: int, clip_index: int, user_prompt: str = "") -> str:
+    """
+    Read back the MIDI notes in a Session-view clip.
+
+    Returns JSON with the clip's name, length, and a list of notes, each with
+    pitch, start_time, duration, velocity, and mute (plus probability and
+    velocity_deviation on Live 11+). Use this to verify what was written with
+    add_notes_to_clip or to review notes edited by hand in Live.
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot containing the clip
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting clip notes: {str(e)}")
+        return f"Error getting clip notes: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("set_track_mixer")
+def set_track_mixer(
+    ctx: Context,
+    track_index: int,
+    volume: Optional[float] = None,
+    pan: Optional[float] = None,
+    mute: Optional[bool] = None,
+    solo: Optional[bool] = None,
+    user_prompt: str = ""
+) -> str:
+    """
+    Set mixer properties on a track. Only the parameters you pass are changed.
+
+    Parameters:
+    - track_index: The index of the track to adjust
+    - volume: Track volume from 0.0 to 1.0 (0.85 is 0 dB, Live's default)
+    - pan: Stereo panning from -1.0 (left) to 1.0 (right), 0.0 is center
+    - mute: Mute (True) or unmute (False) the track
+    - solo: Solo (True) or unsolo (False) the track
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        params = {"track_index": track_index}
+        if volume is not None:
+            params["volume"] = volume
+        if pan is not None:
+            params["pan"] = pan
+        if mute is not None:
+            params["mute"] = mute
+        if solo is not None:
+            params["solo"] = solo
+        if len(params) == 1:
+            return "No mixer parameters provided — pass at least one of volume, pan, mute, solo"
+
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_mixer", params)
+        return (
+            f"Mixer updated on track '{result.get('name', track_index)}': "
+            f"volume={result.get('volume')}, pan={result.get('panning')}, "
+            f"mute={result.get('mute')}, solo={result.get('solo')}"
+        )
+    except Exception as e:
+        logger.error(f"Error setting track mixer: {str(e)}")
+        return f"Error setting track mixer: {str(e)}"
+
+@mcp.tool()
 @rich_telemetry_tool("set_clip_name")
 def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str, user_prompt: str = "") -> str:
     """
@@ -486,12 +560,17 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, user_pro
         
         # Check if the instrument was loaded successfully
         if result.get("loaded", False):
+            item_name = result.get("item_name", uri)
             new_devices = result.get("new_devices", [])
             if new_devices:
-                return f"Loaded instrument with URI '{uri}' on track {track_index}. New devices: {', '.join(new_devices)}"
-            else:
-                devices = result.get("devices_after", [])
-                return f"Loaded instrument with URI '{uri}' on track {track_index}. Devices on track: {', '.join(devices)}"
+                return f"Loaded '{item_name}' on track {track_index}. New devices: {', '.join(new_devices)}"
+            devices = result.get("devices_after", [])
+            if devices:
+                return f"Loaded '{item_name}' on track {track_index}. Devices on track: {', '.join(devices)}"
+            # Older remote script versions don't report device lists — don't
+            # make a successful load read like a failure.
+            return (f"Loaded '{item_name}' on track {track_index}. "
+                    f"(Device list unavailable — verify with get_track_info.)")
         else:
             return f"Failed to load instrument with URI '{uri}'"
     except Exception as e:
@@ -688,46 +767,55 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, 
     """
     Load a drum rack and then load a specific drum kit into it.
 
+    Note: a full drum kit preset (.adg) already contains its own Drum Rack —
+    for those, prefer load_instrument_or_effect with the kit's own URI
+    (e.g. 'query:Drums#FileId_6079'), which loads the complete kit in one step.
+
     Parameters:
     - track_index: The index of the track to load on
-    - rack_uri: The URI of the drum rack to load (e.g., 'Drums/Drum Rack')
-    - kit_path: Path to the drum kit inside the browser (e.g., 'drums/acoustic/kit1')
+    - rack_uri: Browser URI of the drum rack to load, in Live's 'query:' form,
+      e.g. 'query:Drums#Drum%20Rack'. (Plain names like 'Drums/Drum Rack' are
+      not valid URIs and will not be found.)
+    - kit_path: Browser *folder* path to scan for a loadable kit, in the format
+      'category/folder' (e.g. 'drums'). The first loadable item found there is
+      loaded into the rack.
     - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
-        
-        # Step 1: Load the drum rack
+
+        # Resolve the kit BEFORE loading anything, so a bad kit_path doesn't
+        # leave a half-configured track (bare rack, no kit) behind.
+        kit_result = ableton.send_command("get_browser_items_at_path", {
+            "path": kit_path
+        })
+
+        if "error" in kit_result:
+            return f"No changes made — failed to find drum kit: {kit_result.get('error')}"
+
+        kit_items = kit_result.get("items", [])
+        loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
+
+        if not loadable_kits:
+            return (f"No changes made — no loadable drum kits found at '{kit_path}'. "
+                    f"kit_path must be a browser folder; if it points at a kit file "
+                    f"(.adg), load it directly with load_instrument_or_effect instead.")
+
+        # Load the drum rack, then the kit into it
         result = ableton.send_command("load_browser_item", {
             "track_index": track_index,
             "item_uri": rack_uri
         })
-        
+
         if not result.get("loaded", False):
             return f"Failed to load drum rack with URI '{rack_uri}'"
-        
-        # Step 2: Get the drum kit items at the specified path
-        kit_result = ableton.send_command("get_browser_items_at_path", {
-            "path": kit_path
-        })
-        
-        if "error" in kit_result:
-            return f"Loaded drum rack but failed to find drum kit: {kit_result.get('error')}"
-        
-        # Step 3: Find a loadable drum kit
-        kit_items = kit_result.get("items", [])
-        loadable_kits = [item for item in kit_items if item.get("is_loadable", False)]
-        
-        if not loadable_kits:
-            return f"Loaded drum rack but no loadable drum kits found at '{kit_path}'"
-        
-        # Step 4: Load the first loadable kit
+
         kit_uri = loadable_kits[0].get("uri")
         load_result = ableton.send_command("load_browser_item", {
             "track_index": track_index,
             "item_uri": kit_uri
         })
-        
+
         return f"Loaded drum rack and kit '{loadable_kits[0].get('name')}' on track {track_index}"
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
