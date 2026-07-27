@@ -115,7 +115,7 @@ class AbletonConnection:
             "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
             "set_tempo", "fire_clip", "stop_clip", "set_device_parameter",
             "start_playback", "stop_playback", "load_instrument_or_effect",
-            "set_track_mixer",
+            "set_track_mixer", "execute_code",
             # Arrangement view commands
             "switch_to_arrangement_view", "set_current_song_time",
             "duplicate_session_clip_to_arrangement"
@@ -125,7 +125,7 @@ class AbletonConnection:
         # than the default modifying-command budget (e.g. importing/decoding a
         # large audio file). Give them a wider socket timeout so we don't time
         # out before the Remote Script's own queue does.
-        long_running_commands = {"create_audio_clip": 65.0}
+        long_running_commands = {"create_audio_clip": 65.0, "execute_code": 35.0}
         
         try:
             logger.info(f"Sending command: {command_type} with params: {params}")
@@ -820,6 +820,49 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str, 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("execute_live_code")
+def execute_live_code(ctx: Context, code: str, user_prompt: str = "") -> str:
+    """
+    Execute a Python script inside Ableton Live against the Live API.
+
+    Use this to batch many small operations into one call (e.g. build several
+    tracks/clips/notes at once) or to reach Live API features that have no
+    dedicated tool. Prefer the dedicated tools for simple single operations.
+
+    Execution environment:
+    - Runs on Live's MAIN THREAD via the remote script. Live's UI is frozen
+      while the script runs, and a runaway script (e.g. an unbounded loop)
+      CANNOT be killed — it will hang Live. Keep scripts short and bounded;
+      never sleep or busy-wait. Budget is ~30 seconds before timeout.
+    - In scope: `song` (Live Song object), `application` (Live Application),
+      `control_surface` (the remote script), `json`.
+    - Assign to a `result` variable to return data (JSON-serializable values
+      come back as JSON, anything else as repr). print() output is captured
+      and returned too. Both are truncated at 50k chars.
+    - The whole script is wrapped in one Live undo step, so its changes can
+      be reverted with a single Ctrl+Z in Live.
+    - Errors return the Python traceback of the failing script line.
+
+    Parameters:
+    - code: The Python script to execute
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    # Validate syntax locally first — cheaper than a round trip, and it keeps
+    # obviously broken scripts from ever reaching Live.
+    try:
+        compile(code, "<execute_live_code>", "exec")
+    except SyntaxError as e:
+        return f"Syntax error (script was NOT sent to Live): {e}"
+
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("execute_code", {"code": code})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error executing code in Live: {str(e)}")
+        return f"Error executing code in Live: {str(e)}"
 
 # ── Arrangement view tools ────────────────────────────────────────────────────
 

@@ -2,8 +2,10 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
+import io
 import os
 import socket
+import sys
 import json
 import threading
 import time
@@ -234,7 +236,7 @@ class AbletonMCP(ControlSurface):
                                  # Arrangement view – must run on the main thread
                                  "switch_to_arrangement_view", "set_current_song_time",
                                  "duplicate_session_clip_to_arrangement",
-                                 "set_track_mixer"]:
+                                 "set_track_mixer", "execute_code"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -311,6 +313,8 @@ class AbletonMCP(ControlSurface):
                                 params.get("pan", None),
                                 params.get("mute", None),
                                 params.get("solo", None))
+                        elif command_type == "execute_code":
+                            result = self._execute_code(params.get("code", ""))
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -330,7 +334,7 @@ class AbletonMCP(ControlSurface):
                 # create_audio_clip, which decodes/imports the audio file on
                 # the main thread) can take longer than the default 10s on
                 # larger files — give them more headroom.
-                long_running_commands = {"create_audio_clip": 60.0}
+                long_running_commands = {"create_audio_clip": 60.0, "execute_code": 30.0}
                 queue_timeout = long_running_commands.get(command_type, 10.0)
                 try:
                     task_response = response_queue.get(timeout=queue_timeout)
@@ -545,6 +549,84 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error setting track mixer: " + str(e))
             raise
+
+    # Cap on stdout/result text returned from execute_code, so a huge dump
+    # doesn't blow up the JSON response over the socket.
+    _EXECUTE_CODE_OUTPUT_LIMIT = 50000
+
+    def _execute_code(self, code):
+        """Execute a Python script against the Live API on the main thread.
+
+        The script runs with `song` (the Live Song), `application`, and this
+        control surface (`control_surface`) in scope. Anything assigned to a
+        `result` variable is returned (JSON if serializable, else repr), along
+        with captured stdout. The whole script runs inside one Live undo step
+        so its changes revert with a single Ctrl+Z.
+        """
+        if not code or not code.strip():
+            raise ValueError("No code provided")
+
+        # Validate syntax before touching Live state
+        compiled = compile(code, "<ableton-mcp>", "exec")
+
+        namespace = {
+            "song": self._song,
+            "application": self.application(),
+            "control_surface": self,
+            "json": json,
+        }
+
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        undo_started = False
+        try:
+            try:
+                self._song.begin_undo_step()
+                undo_started = True
+            except Exception as e:
+                # Undo grouping is best-effort — run anyway, but say so
+                self.log_message("execute_code: begin_undo_step failed: " + str(e))
+
+            sys.stdout = captured
+            try:
+                exec(compiled, namespace)
+            except Exception as e:
+                # Return the traceback as data instead of raising, so the
+                # client sees exactly which line of its script failed.
+                stdout_text = captured.getvalue()
+                if len(stdout_text) > self._EXECUTE_CODE_OUTPUT_LIMIT:
+                    stdout_text = stdout_text[:self._EXECUTE_CODE_OUTPUT_LIMIT] + "... [truncated]"
+                return {
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                    "stdout": stdout_text,
+                    "undo_step": undo_started,
+                }
+        finally:
+            sys.stdout = old_stdout
+            if undo_started:
+                try:
+                    self._song.end_undo_step()
+                except Exception as e:
+                    self.log_message("execute_code: end_undo_step failed: " + str(e))
+
+        result_value = namespace.get("result", None)
+        try:
+            json.dumps(result_value)
+        except (TypeError, ValueError):
+            result_value = repr(result_value)
+        if isinstance(result_value, str) and len(result_value) > self._EXECUTE_CODE_OUTPUT_LIMIT:
+            result_value = result_value[:self._EXECUTE_CODE_OUTPUT_LIMIT] + "... [truncated]"
+
+        stdout_text = captured.getvalue()
+        if len(stdout_text) > self._EXECUTE_CODE_OUTPUT_LIMIT:
+            stdout_text = stdout_text[:self._EXECUTE_CODE_OUTPUT_LIMIT] + "... [truncated]"
+
+        return {
+            "result": result_value,
+            "stdout": stdout_text,
+            "undo_step": undo_started,
+        }
 
     def _create_clip(self, track_index, clip_index, length):
         """Create a new MIDI clip in the specified track and clip slot"""
