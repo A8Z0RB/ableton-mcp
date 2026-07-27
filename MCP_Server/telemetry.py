@@ -136,7 +136,11 @@ class TelemetryCollector:
         logger.debug(f"Telemetry initialized (enabled={self.config.enabled}, has_supabase={HAS_SUPABASE})")
 
     def _is_disabled(self) -> bool:
-        """Check if telemetry is disabled via environment variables"""
+        """Telemetry is OPT-IN in this fork: disabled unless explicitly enabled.
+
+        Set ABLETON_MCP_ENABLE_TELEMETRY=true to turn it on. The upstream
+        disable variables are still honored and win over the enable flag.
+        """
         disable_vars = [
             "DISABLE_TELEMETRY",
             "ABLETON_MCP_DISABLE_TELEMETRY",
@@ -146,7 +150,9 @@ class TelemetryCollector:
         for var in disable_vars:
             if os.environ.get(var, "").lower() in ("true", "1", "yes", "on"):
                 return True
-        return False
+
+        return os.environ.get("ABLETON_MCP_ENABLE_TELEMETRY", "").lower() not in (
+            "true", "1", "yes", "on")
 
     def _get_data_directory(self) -> Path:
         """Get directory for storing telemetry data"""
