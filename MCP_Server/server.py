@@ -842,6 +842,10 @@ def execute_live_code(ctx: Context, code: str, user_prompt: str = "") -> str:
       song.tracks[i].clip_slots[j].clip, track.mixer_device.volume.value,
       clip.get_notes_extended(...). Do NOT try to `import live`; stdlib
       imports are fine (Live bundles its own Python, no pip packages).
+    - Before writing a nontrivial script, read LOM.md at the root of the
+      ableton-mcp repo checkout — a curated Live Object Model reference with
+      the exact signatures, gotchas (argument-order traps, value ranges), and
+      a list of things the API cannot do.
     - The code runs as a module-level script: `return` is a SyntaxError.
       Assign to a `result` variable instead; JSON-serializable values come
       back as JSON, anything else as repr(). print() output is captured and
