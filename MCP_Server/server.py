@@ -837,10 +837,22 @@ def execute_live_code(ctx: Context, code: str, user_prompt: str = "") -> str:
       CANNOT be killed — it will hang Live. Keep scripts short and bounded;
       never sleep or busy-wait. Budget is ~30 seconds before timeout.
     - In scope: `song` (Live Song object), `application` (Live Application),
-      `control_surface` (the remote script), `json`.
-    - Assign to a `result` variable to return data (JSON-serializable values
-      come back as JSON, anything else as repr). print() output is captured
-      and returned too. Both are truncated at 50k chars.
+      `control_surface` (the remote script), `json`. These are Live Object
+      Model (remote-script API) objects — e.g. song.tempo,
+      song.tracks[i].clip_slots[j].clip, track.mixer_device.volume.value,
+      clip.get_notes_extended(...). Do NOT try to `import live`; stdlib
+      imports are fine (Live bundles its own Python, no pip packages).
+    - The code runs as a module-level script: `return` is a SyntaxError.
+      Assign to a `result` variable instead; JSON-serializable values come
+      back as JSON, anything else as repr(). print() output is captured and
+      returned too. Both are truncated at 50k chars.
+
+    Example — read every track's name and clip count in one call:
+        result = [
+            {"name": t.name,
+             "clips": sum(1 for s in t.clip_slots if s.has_clip)}
+            for t in song.tracks
+        ]
     - The whole script is wrapped in one Live undo step, so its changes can
       be reverted with a single Ctrl+Z in Live.
     - Errors return the Python traceback of the failing script line.
