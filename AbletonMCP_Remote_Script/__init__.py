@@ -236,7 +236,14 @@ class AbletonMCP(ControlSurface):
                                  # Arrangement view – must run on the main thread
                                  "switch_to_arrangement_view", "set_current_song_time",
                                  "duplicate_session_clip_to_arrangement",
-                                 "set_track_mixer", "execute_code"]:
+                                 "set_track_mixer", "execute_code",
+                                 # VST/AU plugin commands (from closestfriend/ableton-mcp)
+                                 "get_available_plugins", "load_vst_plugin",
+                                 "get_plugin_parameters", "set_plugin_parameter",
+                                 # Device / mixing commands (from farmhutsoftwareteam/ableton-mcp-extended)
+                                 "get_device_parameters", "set_device_parameter",
+                                 "delete_track", "delete_device", "set_track_send",
+                                 "get_device_routings", "set_device_routing"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -312,9 +319,66 @@ class AbletonMCP(ControlSurface):
                                 params.get("volume", None),
                                 params.get("pan", None),
                                 params.get("mute", None),
-                                params.get("solo", None))
+                                params.get("solo", None),
+                                params.get("track_kind", "regular"))
                         elif command_type == "execute_code":
                             result = self._execute_code(params.get("code", ""))
+                        # ── VST/AU plugin commands (from closestfriend/ableton-mcp) ──
+                        elif command_type == "get_available_plugins":
+                            plugin_type = params.get("plugin_type", "all")
+                            result = self._get_available_plugins(plugin_type)
+                        elif command_type == "load_vst_plugin":
+                            result = self._load_vst_plugin(
+                                params.get("track_index", 0),
+                                params.get("plugin_name", ""),
+                                params.get("plugin_type", "auto"))
+                        elif command_type == "get_plugin_parameters":
+                            result = self._get_plugin_parameters(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0))
+                        elif command_type == "set_plugin_parameter":
+                            result = self._set_plugin_parameter(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", 0),
+                                params.get("value", 0.0))
+                        # ── Device / mixing commands (from farmhutsoftwareteam/ableton-mcp-extended) ──
+                        elif command_type == "get_device_parameters":
+                            result = self._get_device_parameters(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("track_kind", "regular"))
+                        elif command_type == "set_device_parameter":
+                            result = self._set_device_parameter(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", 0),
+                                params.get("value", 0.0),
+                                params.get("track_kind", "regular"))
+                        elif command_type == "delete_track":
+                            result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "delete_device":
+                            result = self._delete_device(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("track_kind", "regular"))
+                        elif command_type == "set_track_send":
+                            result = self._set_track_send(
+                                params.get("track_index", 0),
+                                params.get("send_index", 0),
+                                params.get("value", 0.0))
+                        elif command_type == "get_device_routings":
+                            result = self._get_device_routings(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("track_kind", "regular"))
+                        elif command_type == "set_device_routing":
+                            result = self._set_device_routing(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("routing_type_name", ""),
+                                params.get("routing_channel_name", ""),
+                                params.get("track_kind", "regular"))
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -517,13 +581,11 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting track name: " + str(e))
             raise
 
-    def _set_track_mixer(self, track_index, volume=None, pan=None, mute=None, solo=None):
-        """Set mixer properties on a track. Only the provided values are changed."""
+    def _set_track_mixer(self, track_index, volume=None, pan=None, mute=None, solo=None, track_kind="regular"):
+        """Set mixer properties on a track. Only the provided values are changed.
+        track_kind: 'regular' (default), 'return', or 'master' (from farmhutsoftwareteam/ableton-mcp-extended)."""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-
-            track = self._song.tracks[track_index]
+            track = self._resolve_track(track_index, track_kind)
             mixer = track.mixer_device
 
             if volume is not None:
@@ -1512,3 +1574,451 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error getting browser items at path: {0}".format(str(e)))
             self.log_message(traceback.format_exc())
             raise
+
+
+    # -------------------------------------------------------------------------
+    # VST/AU plugin commands
+    # Ported from closestfriend/ableton-mcp (MIT) -
+    # AbletonMCP_Remote_Script/__init__.py (VST/AU plugin section)
+    # -------------------------------------------------------------------------
+
+    def _get_available_plugins(self, plugin_type):
+        """Get a list of available VST/AU plugins"""
+        try:
+            app = self.application()
+            if not app:
+                raise RuntimeError("Could not access Live application")
+
+            plugins = []
+
+            # Access the plugins category in the browser
+            if hasattr(app.browser, 'plugins'):
+                plugin_category = app.browser.plugins
+
+                # Iterate through plugin folders
+                for plugin_folder in plugin_category.children:
+                    folder_name = plugin_folder.name.lower()
+
+                    # Filter by type if specified
+                    if plugin_type != "all":
+                        if plugin_type == "vst" and "vst" not in folder_name:
+                            continue
+                        elif plugin_type == "vst3" and "vst3" not in folder_name:
+                            continue
+                        elif plugin_type == "au" and "au" not in folder_name:
+                            continue
+
+                    # Get plugins in this folder
+                    for plugin in plugin_folder.children:
+                        plugins.append({
+                            "name": plugin.name,
+                            "type": folder_name,
+                            "uri": plugin.uri if hasattr(plugin, 'uri') else None,
+                            "is_loadable": plugin.is_loadable if hasattr(plugin, 'is_loadable') else False
+                        })
+
+            return {
+                "plugin_type": plugin_type,
+                "plugins": plugins,
+                "count": len(plugins)
+            }
+        except Exception as e:
+            self.log_message("Error getting available plugins: " + str(e))
+            raise
+
+    def _load_vst_plugin(self, track_index, plugin_name, plugin_type):
+        """Load a VST/AU plugin onto a track"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            # Select the track
+            self._song.view.selected_track = track
+
+            # Find the plugin in the browser
+            app = self.application()
+            if not app:
+                raise RuntimeError("Could not access Live application")
+
+            plugin_item = None
+
+            # Search for the plugin
+            if hasattr(app.browser, 'plugins'):
+                for folder in app.browser.plugins.children:
+                    if plugin_type != "auto" and plugin_type not in folder.name.lower():
+                        continue
+
+                    for plugin in folder.children:
+                        if plugin.name.lower() == plugin_name.lower():
+                            plugin_item = plugin
+                            break
+
+                    if plugin_item:
+                        break
+
+            if not plugin_item:
+                raise ValueError("Plugin '{0}' not found".format(plugin_name))
+
+            # Load the plugin
+            app.browser.load_item(plugin_item)
+
+            result = {
+                "loaded": True,
+                "plugin_name": plugin_name,
+                "track_name": track.name
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error loading VST plugin: " + str(e))
+            raise
+
+    def _get_plugin_parameters(self, track_index, device_index):
+        """Get all parameters for a VST/AU plugin device"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError("Device index out of range")
+
+            device = track.devices[device_index]
+
+            parameters = []
+            for param_index, parameter in enumerate(device.parameters):
+                parameters.append({
+                    "index": param_index,
+                    "name": parameter.name,
+                    "value": parameter.value,
+                    "min": parameter.min,
+                    "max": parameter.max,
+                    "is_quantized": parameter.is_quantized,
+                    "is_enabled": parameter.is_enabled
+                })
+
+            result = {
+                "device_name": device.name,
+                "parameters": parameters,
+                "parameter_count": len(parameters)
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error getting plugin parameters: " + str(e))
+            raise
+
+    def _set_plugin_parameter(self, track_index, device_index, parameter_index, value):
+        """Set a parameter value for a VST/AU plugin"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError("Device index out of range")
+
+            device = track.devices[device_index]
+
+            if parameter_index < 0 or parameter_index >= len(device.parameters):
+                raise IndexError("Parameter index out of range")
+
+            parameter = device.parameters[parameter_index]
+
+            # Clamp value to parameter range
+            clamped_value = max(parameter.min, min(parameter.max, value))
+            parameter.value = clamped_value
+
+            result = {
+                "set": True,
+                "parameter_name": parameter.name,
+                "value": parameter.value
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error setting plugin parameter: " + str(e))
+            raise
+
+    # -------------------------------------------------------------------------
+    # Device / mixing commands (track_kind: regular / return / master)
+    # Ported from farmhutsoftwareteam/ableton-mcp-extended (MIT) -
+    # AbletonMCP_Remote_Script/__init__.py
+    # -------------------------------------------------------------------------
+
+    def _resolve_track(self, track_index, track_kind="regular"):
+        """Resolve a track by kind. track_kind in {'regular', 'return', 'master'}."""
+        if track_kind == "regular":
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index {0} out of range".format(track_index))
+            return self._song.tracks[track_index]
+        elif track_kind == "return":
+            if track_index < 0 or track_index >= len(self._song.return_tracks):
+                raise IndexError("Return track index {0} out of range (session has {1} returns)".format(track_index, len(self._song.return_tracks)))
+            return self._song.return_tracks[track_index]
+        elif track_kind == "master":
+            return self._song.master_track
+        else:
+            raise ValueError("Unknown track_kind '{0}'. Must be 'regular', 'return', or 'master'.".format(track_kind))
+
+    def _resolve_device(self, track, device_index):
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index {0} out of range".format(device_index))
+        return track.devices[device_index]
+
+    def _get_device_parameters(self, track_index, device_index, track_kind="regular"):
+        track = self._resolve_track(track_index, track_kind)
+        device = self._resolve_device(track, device_index)
+        params = []
+        for i, p in enumerate(device.parameters):
+            entry = {
+                "index": i,
+                "name": p.name,
+                "value": p.value,
+                "min": p.min,
+                "max": p.max,
+                "is_quantized": p.is_quantized,
+            }
+            try:
+                if p.is_quantized and hasattr(p, "value_items"):
+                    entry["value_items"] = [str(v) for v in p.value_items]
+            except Exception:
+                pass
+            params.append(entry)
+        return {
+            "track_index": track_index,
+            "device_index": device_index,
+            "device_name": device.name,
+            "parameters": params,
+        }
+
+    def _set_device_parameter(self, track_index, device_index, parameter_index, value, track_kind="regular"):
+        track = self._resolve_track(track_index, track_kind)
+        device = self._resolve_device(track, device_index)
+        if parameter_index < 0 or parameter_index >= len(device.parameters):
+            raise IndexError("Parameter index {0} out of range".format(parameter_index))
+        p = device.parameters[parameter_index]
+        clipped = max(p.min, min(p.max, float(value)))
+        p.value = clipped
+        return {
+            "track_index": track_index,
+            "device_index": device_index,
+            "parameter_index": parameter_index,
+            "parameter_name": p.name,
+            "requested_value": value,
+            "applied_value": p.value,
+            "min": p.min,
+            "max": p.max,
+        }
+
+    def _delete_track(self, track_index):
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index {0} out of range".format(track_index))
+        name = self._song.tracks[track_index].name
+        self._song.delete_track(track_index)
+        return {"deleted_track_index": track_index, "deleted_track_name": name}
+
+    def _delete_device(self, track_index, device_index, track_kind="regular"):
+        track = self._resolve_track(track_index, track_kind)
+        device = self._resolve_device(track, device_index)
+        device_name = device.name
+        track.delete_device(device_index)
+        return {"track_kind": track_kind, "track_index": track_index, "device_index": device_index, "deleted_device_name": device_name}
+
+    def _set_track_send(self, track_index, send_index, value):
+        track = self._resolve_track(track_index)
+        sends = track.mixer_device.sends
+        if send_index < 0 or send_index >= len(sends):
+            raise IndexError("Send index {0} out of range (track has {1} sends)".format(send_index, len(sends)))
+        v = max(0.0, min(1.0, float(value)))
+        sends[send_index].value = v
+        return {
+            "track_index": track_index,
+            "send_index": send_index,
+            "value": sends[send_index].value,
+            "send_count": len(sends),
+        }
+
+    def _get_device_routings(self, track_index, device_index, track_kind="regular"):
+        """List available input routings for a device (used for sidechain source selection)."""
+        track = self._resolve_track(track_index, track_kind)
+        device = self._resolve_device(track, device_index)
+
+        def name_of(obj):
+            for attr in ("display_name", "name"):
+                if hasattr(obj, attr):
+                    try:
+                        return getattr(obj, attr)
+                    except Exception:
+                        continue
+            return str(obj)
+
+        result = {
+            "track_index": track_index,
+            "device_index": device_index,
+            "device_name": device.name,
+            "track_kind": track_kind,
+            "available_routing_types": [],
+            "available_routing_channels": [],
+            "current_routing_type": None,
+            "current_routing_channel": None,
+            "has_input_routings_attr": hasattr(device, "input_routings"),
+            "has_audio_inputs_attr": hasattr(device, "audio_inputs"),
+        }
+
+        # Modern Live API: available_input_routing_types / available_input_routing_channels
+        for attr in ("available_input_routing_types", "input_routing_types", "input_routings"):
+            if hasattr(device, attr):
+                try:
+                    for r in getattr(device, attr):
+                        result["available_routing_types"].append(name_of(r))
+                    if result["available_routing_types"]:
+                        result["routing_types_source_attr"] = attr
+                        break
+                except Exception:
+                    continue
+
+        for attr in ("available_input_routing_channels", "input_routing_channels"):
+            if hasattr(device, attr):
+                try:
+                    for c in getattr(device, attr):
+                        result["available_routing_channels"].append(name_of(c))
+                    if result["available_routing_channels"]:
+                        result["routing_channels_source_attr"] = attr
+                        break
+                except Exception:
+                    continue
+
+        for attr in ("input_routing_type",):
+            if hasattr(device, attr):
+                try:
+                    rt = getattr(device, attr)
+                    result["current_routing_type"] = name_of(rt)
+                except Exception:
+                    pass
+
+        for attr in ("input_routing_channel",):
+            if hasattr(device, attr):
+                try:
+                    rc = getattr(device, attr)
+                    result["current_routing_channel"] = name_of(rc)
+                except Exception:
+                    pass
+
+        # Audio_inputs (newer API) - sidechain may be on audio_inputs[1]
+        if hasattr(device, "audio_inputs"):
+            try:
+                ai_info = []
+                for i, ai in enumerate(device.audio_inputs):
+                    entry = {"index": i}
+                    if hasattr(ai, "name"):
+                        try:
+                            entry["name"] = ai.name
+                        except Exception:
+                            pass
+                    if hasattr(ai, "routings"):
+                        try:
+                            entry["routings"] = [name_of(r) for r in ai.routings]
+                        except Exception:
+                            pass
+                    if hasattr(ai, "routing"):
+                        try:
+                            entry["current_routing"] = name_of(ai.routing)
+                        except Exception:
+                            pass
+                    ai_info.append(entry)
+                result["audio_inputs"] = ai_info
+            except Exception:
+                pass
+
+        return result
+
+    def _set_device_routing(self, track_index, device_index, routing_type_name, routing_channel_name, track_kind="regular"):
+        """Set a device's input routing (e.g., sidechain source) by matching type/channel name."""
+        track = self._resolve_track(track_index, track_kind)
+        device = self._resolve_device(track, device_index)
+
+        def name_of(obj):
+            for attr in ("display_name", "name"):
+                if hasattr(obj, attr):
+                    try:
+                        return getattr(obj, attr)
+                    except Exception:
+                        continue
+            return str(obj)
+
+        type_set = False
+        channel_set = False
+        type_attempts = []
+        channel_attempts = []
+
+        # Set routing type via device.input_routing_type
+        if routing_type_name:
+            for list_attr, set_attr in (
+                ("available_input_routing_types", "input_routing_type"),
+                ("input_routing_types", "input_routing_type"),
+                ("input_routings", "input_routing_type"),
+            ):
+                if hasattr(device, list_attr) and hasattr(device, set_attr):
+                    try:
+                        for r in getattr(device, list_attr):
+                            n = name_of(r)
+                            type_attempts.append(n)
+                            if routing_type_name.lower() in n.lower():
+                                setattr(device, set_attr, r)
+                                type_set = True
+                                break
+                        if type_set:
+                            break
+                    except Exception:
+                        continue
+
+        # Set routing channel via device.input_routing_channel
+        if routing_channel_name:
+            for list_attr, set_attr in (
+                ("available_input_routing_channels", "input_routing_channel"),
+                ("input_routing_channels", "input_routing_channel"),
+            ):
+                if hasattr(device, list_attr) and hasattr(device, set_attr):
+                    try:
+                        for c in getattr(device, list_attr):
+                            n = name_of(c)
+                            channel_attempts.append(n)
+                            if routing_channel_name.lower() in n.lower():
+                                setattr(device, set_attr, c)
+                                channel_set = True
+                                break
+                        if channel_set:
+                            break
+                    except Exception:
+                        continue
+
+        # Fallback: try audio_inputs[1].routing for sidechain
+        if not channel_set and hasattr(device, "audio_inputs"):
+            try:
+                for ai in device.audio_inputs:
+                    if hasattr(ai, "routings") and hasattr(ai, "routing"):
+                        for r in ai.routings:
+                            n = name_of(r)
+                            channel_attempts.append("audio_inputs:" + n)
+                            if routing_channel_name and routing_channel_name.lower() in n.lower():
+                                ai.routing = r
+                                channel_set = True
+                                break
+                        if channel_set:
+                            break
+            except Exception:
+                pass
+
+        return {
+            "track_index": track_index,
+            "device_index": device_index,
+            "device_name": device.name,
+            "routing_type_set": type_set,
+            "routing_channel_set": channel_set,
+            "requested_type": routing_type_name,
+            "requested_channel": routing_channel_name,
+            "type_attempts_seen": type_attempts[:20],
+            "channel_attempts_seen": channel_attempts[:30],
+        }

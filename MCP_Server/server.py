@@ -118,7 +118,11 @@ class AbletonConnection:
             "set_track_mixer", "execute_code",
             # Arrangement view commands
             "switch_to_arrangement_view", "set_current_song_time",
-            "duplicate_session_clip_to_arrangement"
+            "duplicate_session_clip_to_arrangement",
+            # VST/AU plugin commands (from closestfriend/ableton-mcp)
+            "load_vst_plugin", "set_plugin_parameter",
+            # Device / mixing commands (from farmhutsoftwareteam/ableton-mcp-extended)
+            "delete_track", "delete_device", "set_track_send", "set_device_routing"
         ]
 
         # Commands whose work on Live's main thread can take noticeably longer
@@ -460,21 +464,23 @@ def set_track_mixer(
     pan: Optional[float] = None,
     mute: Optional[bool] = None,
     solo: Optional[bool] = None,
+    track_kind: str = "regular",
     user_prompt: str = ""
 ) -> str:
     """
     Set mixer properties on a track. Only the parameters you pass are changed.
 
     Parameters:
-    - track_index: The index of the track to adjust
+    - track_index: The index of the track to adjust (ignored for master)
     - volume: Track volume from 0.0 to 1.0 (0.85 is 0 dB, Live's default)
     - pan: Stereo panning from -1.0 (left) to 1.0 (right), 0.0 is center
     - mute: Mute (True) or unmute (False) the track
     - solo: Solo (True) or unsolo (False) the track
+    - track_kind: 'regular' (default), 'return', or 'master' (from farmhutsoftwareteam/ableton-mcp-extended)
     - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
-        params = {"track_index": track_index}
+        params = {"track_index": track_index, "track_kind": track_kind}
         if volume is not None:
             params["volume"] = volume
         if pan is not None:
@@ -483,7 +489,7 @@ def set_track_mixer(
             params["mute"] = mute
         if solo is not None:
             params["solo"] = solo
-        if len(params) == 1:
+        if len(params) == 2:
             return "No mixer parameters provided — pass at least one of volume, pan, mute, solo"
 
         ableton = get_ableton_connection()
@@ -987,6 +993,309 @@ def duplicate_to_arrangement(
         logger.error(f"Error duplicating clip to arrangement: {str(e)}")
         return f"Error duplicating clip to arrangement: {str(e)}"
 
+
+# ──────────────────────────────────────────────────────────────────────────
+# VST/AU plugin tools
+# Ported from closestfriend/ableton-mcp (MIT) — MCP_Server/server.py
+# ──────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+@telemetry_tool("get_available_plugins")
+def get_available_plugins(ctx: Context, plugin_type: str = "all", user_prompt: str = "") -> str:
+    """
+    Get a list of available VST/AU plugins from Ableton's browser.
+
+    Parameters:
+    - plugin_type: Type of plugins to list ('vst', 'vst3', 'au', 'all')
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_available_plugins", {
+            "plugin_type": plugin_type
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting available plugins: {str(e)}")
+        return f"Error getting available plugins: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("load_vst_plugin")
+def load_vst_plugin(
+    ctx: Context,
+    track_index: int,
+    plugin_name: str,
+    plugin_type: str = "auto",
+    user_prompt: str = ""
+) -> str:
+    """
+    Load a VST/AU plugin onto a track.
+
+    Parameters:
+    - track_index: The index of the track to load the plugin on
+    - plugin_name: The name of the plugin to load
+    - plugin_type: The plugin format ('vst', 'vst3', 'au', 'auto')
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("load_vst_plugin", {
+            "track_index": track_index,
+            "plugin_name": plugin_name,
+            "plugin_type": plugin_type
+        })
+        return f"Loaded {plugin_type} plugin '{plugin_name}' on track {track_index}"
+    except Exception as e:
+        logger.error(f"Error loading VST plugin: {str(e)}")
+        return f"Error loading VST plugin: {str(e)}"
+
+@mcp.tool()
+@telemetry_tool("get_plugin_parameters")
+def get_plugin_parameters(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    user_prompt: str = ""
+) -> str:
+    """
+    Get all parameters for a VST/AU plugin device.
+
+    Parameters:
+    - track_index: The index of the track containing the plugin
+    - device_index: The index of the device in the track's device chain
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_plugin_parameters", {
+            "track_index": track_index,
+            "device_index": device_index
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting plugin parameters: {str(e)}")
+        return f"Error getting plugin parameters: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("set_plugin_parameter")
+def set_plugin_parameter(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    parameter_index: int,
+    value: float,
+    user_prompt: str = ""
+) -> str:
+    """
+    Set a parameter value for a VST/AU plugin.
+
+    Parameters:
+    - track_index: The index of the track containing the plugin
+    - device_index: The index of the device in the track's device chain
+    - parameter_index: The index of the parameter to set
+    - value: The parameter value (0.0 to 1.0)
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_plugin_parameter", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "parameter_index": parameter_index,
+            "value": value
+        })
+        return f"Set parameter {parameter_index} to {value}"
+    except Exception as e:
+        logger.error(f"Error setting plugin parameter: {str(e)}")
+        return f"Error setting plugin parameter: {str(e)}"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Device / mixing tools
+# Ported from farmhutsoftwareteam/ableton-mcp-extended (MIT) — MCP_Server/server.py
+# ──────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+@telemetry_tool("get_device_parameters")
+def get_device_parameters(ctx: Context, track_index: int, device_index: int, track_kind: str = "regular", user_prompt: str = "") -> str:
+    """
+    List every tunable parameter on a device.
+
+    Returns each parameter's index, name, current value, min, max, and (for quantized
+    parameters like enums) the available value items. Use this BEFORE set_device_parameter
+    so you know which index to address and what range is valid.
+
+    Parameters:
+    - track_index: Track containing the device (ignored for master)
+    - device_index: Position of the device in the track's device chain (0 = first)
+    - track_kind: 'regular' (default), 'return', or 'master'
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_device_parameters", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "track_kind": track_kind,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting device parameters: {str(e)}")
+        return f"Error getting device parameters: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("set_device_parameter")
+def set_device_parameter(ctx: Context, track_index: int, device_index: int,
+                         parameter_index: int, value: float, track_kind: str = "regular", user_prompt: str = "") -> str:
+    """
+    Set a parameter on a device to a specific value.
+
+    Value is clipped to the parameter's min..max if out of range. Call
+    get_device_parameters first to discover the parameter index and valid range.
+
+    Parameters:
+    - track_index: Track containing the device (ignored for master)
+    - device_index: Position of the device in the track's device chain
+    - parameter_index: Index of the parameter (from get_device_parameters)
+    - value: New value (will be clipped to min..max)
+    - track_kind: 'regular' (default), 'return', or 'master'
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_device_parameter", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "parameter_index": parameter_index,
+            "value": value,
+            "track_kind": track_kind,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting device parameter: {str(e)}")
+        return f"Error setting device parameter: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("delete_track")
+def delete_track(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+    """
+    Delete a track (and everything on it) from the session.
+
+    Parameters:
+    - track_index: Index of the track to delete
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_track", {"track_index": track_index})
+        return f"Deleted track {result.get('deleted_track_name', track_index)}"
+    except Exception as e:
+        logger.error(f"Error deleting track: {str(e)}")
+        return f"Error deleting track: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("delete_device")
+def delete_device(ctx: Context, track_index: int, device_index: int, track_kind: str = "regular", user_prompt: str = "") -> str:
+    """
+    Remove a device (effect/instrument/plugin) from a track's device chain.
+
+    Parameters:
+    - track_index: Track containing the device (ignored for master)
+    - device_index: Position of the device in the track's device chain
+    - track_kind: 'regular' (default), 'return', or 'master'
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_device", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "track_kind": track_kind,
+        })
+        return f"Deleted device '{result.get('deleted_device_name')}' from track {track_index}"
+    except Exception as e:
+        logger.error(f"Error deleting device: {str(e)}")
+        return f"Error deleting device: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("set_track_send")
+def set_track_send(ctx: Context, track_index: int, send_index: int, value: float, user_prompt: str = "") -> str:
+    """
+    Set a send level on a track (e.g. how much signal goes to a return track).
+
+    Parameters:
+    - track_index: Index of the track whose send to adjust
+    - send_index: Which send to adjust (0 = first return track)
+    - value: Send level from 0.0 to 1.0
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_send", {
+            "track_index": track_index,
+            "send_index": send_index,
+            "value": value,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track send: {str(e)}")
+        return f"Error setting track send: {str(e)}"
+
+@mcp.tool()
+@telemetry_tool("get_device_routings")
+def get_device_routings(ctx: Context, track_index: int, device_index: int, track_kind: str = "regular", user_prompt: str = "") -> str:
+    """
+    List the available input routings for a device (e.g. sidechain sources on a compressor).
+
+    Parameters:
+    - track_index: Track containing the device (ignored for master)
+    - device_index: Position of the device in the track's device chain
+    - track_kind: 'regular' (default), 'return', or 'master'
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_device_routings", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "track_kind": track_kind,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting device routings: {str(e)}")
+        return f"Error getting device routings: {str(e)}"
+
+@mcp.tool()
+@rich_telemetry_tool("set_device_routing")
+def set_device_routing(ctx: Context, track_index: int, device_index: int,
+                       routing_type_name: str, routing_channel_name: str,
+                       track_kind: str = "regular", user_prompt: str = "") -> str:
+    """
+    Set a device's input routing by matching type/channel name (e.g. sidechain source selection).
+
+    Use get_device_routings first to discover the available names. Matching is
+    case-insensitive and substring-based.
+
+    Parameters:
+    - track_index: Track containing the device (ignored for master)
+    - device_index: Position of the device in the track's device chain
+    - routing_type_name: Name of the routing type to select (e.g. "Sidechain")
+    - routing_channel_name: Name of the routing channel to select (e.g. a track name)
+    - track_kind: 'regular' (default), 'return', or 'master'
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_device_routing", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "routing_type_name": routing_type_name,
+            "routing_channel_name": routing_channel_name,
+            "track_kind": track_kind,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting device routing: {str(e)}")
+        return f"Error setting device routing: {str(e)}"
 
 # Main execution
 def main():

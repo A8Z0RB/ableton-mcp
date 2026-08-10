@@ -1,30 +1,48 @@
 # AbletonMCP — Ableton Live Model Context Protocol Server
 
 Control Ableton Live from Claude (or any MCP client): build tracks, write and
-**read back** MIDI, load instruments, mix, arrange, and run whole Python
-scripts against the Live API in a single call.
+**read back** MIDI, load instruments, design synth sounds, add plugins, and
+mix — or run whole Python scripts against the Live API in a single call.
 
-This is an actively maintained fork of
-[ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp) (which is no
-longer maintained). Full credit to [Siddharth Ahuja](https://x.com/sidahuj)
-for the original architecture. What this fork adds is driven by daily use in
-real music-production sessions — see the [CHANGELOG](CHANGELOG.md).
+> **Fork lineage:** this project is a **merge of three MIT-licensed projects**:
+>
+> 1. **[aarx0/ableton-mcp](https://github.com/aarx0/ableton-mcp)** — the base
+>    (itself a maintained fork of
+>    [MCPBlender/ableton-mcp](https://github.com/MCPBlender/ableton-mcp) by
+>    [Siddharth Ahuja](https://x.com/sidahuj), the original architecture).
+>    Contributes the whole skeleton plus `execute_live_code`, `get_clip_notes`,
+>    `set_track_mixer` and opt-in telemetry.
+> 2. **[closestfriend/ableton-mcp](https://github.com/closestfriend/ableton-mcp)** —
+>    contributes the **VST/AU plugin toolset** (`get_available_plugins`,
+>    `load_vst_plugin`, `get_plugin_parameters`, `set_plugin_parameter`).
+> 3. **[farmhutsoftwareteam/ableton-mcp-extended](https://github.com/farmhutsoftwareteam/ableton-mcp-extended)** —
+>    contributes the **device & mixing toolset** (`get_device_parameters`,
+>    `set_device_parameter`, `delete_track`, `delete_device`, `set_track_send`,
+>    `get_device_routings`, `set_device_routing`, plus `track_kind`
+>    regular/return/master support).
+
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for a detailed component-by-
+component attribution of every borrowed file and function.
 
 **Highlights over upstream:**
 
-- **`execute_live_code`** — run a bounded Python script against the Live
-  Object Model in one call, instead of paying a round trip per operation.
-  Syntax-validated before it's sent, wrapped in a single Live undo step
-  (one Ctrl+Z reverts everything), returns `result`/stdout/tracebacks as data.
-  Ships with a curated [LOM reference](LOM.md) written for LLM consumption.
-- **`get_clip_notes`** — read a clip's MIDI notes back (pitch, timing,
-  velocity, mute). Upstream could write notes but never verify them.
-- **`set_track_mixer`** — set volume, pan, mute, solo per track.
+- **`execute_live_code`** (from aarx0) — run a bounded Python script against
+  the Live Object Model in one call, instead of paying a round trip per
+  operation. Syntax-validated before it's sent, wrapped in a single Live undo
+  step (one Ctrl+Z reverts everything), returns `result`/stdout/tracebacks as
+  data. Ships with a curated [LOM reference](LOM.md) written for LLM
+  consumption.
+- **`get_clip_notes`** (from aarx0) — read a clip's MIDI notes back (pitch,
+  timing, velocity, mute). Essential for collecting training data.
+- **VST/AU plugin control** (from closestfriend) — enumerate plugins in
+  Ableton's browser (`all`/`vst`/`vst3`/`au`), load them onto tracks by name,
+  read and set their parameters with range clamping.
+- **Synth sound design & mixing** (from farmhut) — `get_device_parameters` /
+  `set_device_parameter` for any device on regular/return/master tracks,
+  `set_track_send` for sends, `get_device_routings` / `set_device_routing` for
+  sidechain source selection, `delete_track` / `delete_device`.
 - **Telemetry is opt-in** (off by default). Upstream phones home on startup;
   this fork never sends anything unless you set `ABLETON_MCP_ENABLE_TELEMETRY=true`.
-- Bug fixes: `load_drum_kit` no longer half-mutates your track on failure,
-  device loads report the devices actually added, docstrings document URI
-  formats that actually resolve.
 
 ## How it works
 

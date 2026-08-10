@@ -3,6 +3,37 @@
 All notable changes to this fork. Versioning continues from upstream
 [ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp) 1.2.0.
 
+## 1.4.0 — merge of closestfriend plugin tools + farmhut mixing tools
+
+Merged from two additional MIT-licensed forks (see
+[ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) for full attribution).
+
+### Added (from closestfriend/ableton-mcp — VST/AU plugin toolset)
+- **`get_available_plugins`**: enumerate plugins from `application.browser.plugins`,
+  filterable by `vst` / `vst3` / `au` / `all`.
+- **`load_vst_plugin`**: select a track, find a plugin by name (type auto-detect
+  or forced), load it via `browser.load_item`.
+- **`get_plugin_parameters`**: read every parameter of a plugin device
+  (index, name, value, min, max, is_quantized, is_enabled).
+- **`set_plugin_parameter`**: set a plugin parameter by index with min/max clamping.
+
+### Added (from farmhutsoftwareteam/ableton-mcp-extended — device & mixing toolset)
+- **`get_device_parameters`**: full parameter list (incl. `value_items` for
+  quantized params) on `regular` / `return` / `master` tracks.
+- **`set_device_parameter`**: set a device parameter by index, clipped to
+  min..max; returns requested vs applied value.
+- **`delete_track`** / **`delete_device`**: remove tracks and devices.
+- **`set_track_send`**: send levels to return tracks.
+- **`get_device_routings`** / **`set_device_routing`**: inspect and set input
+  routings by name (e.g. sidechain source selection), incl. `audio_inputs`
+  fallback.
+- `_resolve_track` / `_resolve_device` helpers with `track_kind` resolution.
+
+### Changed
+- **`set_track_mixer`** now accepts `track_kind` (`regular` / `return` /
+  `master`), letting the AI mix on return and master tracks.
+- New modifying commands registered in the server's socket timeout logic.
+
 ## 1.3.0 — 2026-07-27
 
 First release of the maintained fork.
